@@ -1,0 +1,16 @@
+[package]
+name = "box"
+version = "0.1.0"
+edition = "2018"
+target = ""
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+candid = "0.7.4"
+ic-cdk = "0.4"
+ic-cdk-macros = "0.4"
+
+[dev-dependencies]
+rand = "0.8.5"

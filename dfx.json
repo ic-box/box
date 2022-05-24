@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "dfx": "0.9.3",
+  "canisters": {
+    "box": {
+      "type": "rust",
+      "package": "box",
+      "candid": "src/box/box.did"
+    }
+  },
+  "networks": {
+    "local": {
+      "bind": "127.0.0.1:8000",
+      "type": "ephemeral"
+    }
+  }
+}
