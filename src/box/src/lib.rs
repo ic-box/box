@@ -6,3 +6,4 @@ mod stable_memory;
 mod cluster;
 mod file_system;
 mod serde;
+mod directory;

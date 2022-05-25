@@ -1,7 +1,9 @@
-use std::io;
+use std::io::{self, Write};
 
 use crate::bitmap::Bitmap;
+use crate::block::Block;
 use crate::cluster::Cluster;
+use crate::directory::Directory;
 use crate::memory::Memory;
 use crate::serde::{Deserialize, Serialize};
 
@@ -14,16 +16,21 @@ pub struct FileSystem<M: Memory> {
 impl<M: Memory> FileSystem<M> {
     const PREAMBLE_BLOCKS: usize = 32;
 
-    pub fn new(memory: M) -> Self {
+    pub fn new(mut memory: M) -> io::Result<Self> {
         let mut bitmap = Bitmap::new::<M>();
         for i in 0..Self::PREAMBLE_BLOCKS {
             bitmap.occupy(i);
         }
-        Self {
+
+        let mut root_cluster = Cluster::default();
+
+        Directory::default().serialize(root_cluster.writer(&mut bitmap, memory.writer()))?;
+
+        Ok(Self {
             bitmap,
-            root_cluster: Cluster::default(),
+            root_cluster,
             memory,
-        }
+        })
     }
 
     pub fn open(memory: M) -> io::Result<Self> {
@@ -39,6 +46,24 @@ impl<M: Memory> FileSystem<M> {
             root_cluster,
             memory,
         })
+    }
+
+    pub fn with_root_directory<R>(
+        &self,
+        f: impl FnOnce(&Directory) -> io::Result<R>,
+    ) -> io::Result<R> {
+        let dir = self.read_root_directory()?;
+        f(&dir)
+    }
+
+    pub fn with_root_directory_mut<R>(
+        &mut self,
+        f: impl FnOnce(&mut Directory, &mut Self) -> io::Result<R>,
+    ) -> io::Result<R> {
+        let mut dir = self.read_root_directory()?;
+        let r = f(&mut dir, self);
+        self.write_root_directory(&dir)?;
+        r
     }
 
     pub fn write_into_cluster<'a>(
@@ -59,6 +84,16 @@ impl<M: Memory> FileSystem<M> {
 
     pub fn read_from_root_cluster(&self) -> impl '_ + io::Read + io::Seek {
         self.root_cluster.reader(self.memory.reader())
+    }
+
+    pub fn read_root_directory(&self) -> io::Result<Directory> {
+        let r = self.read_from_root_cluster();
+        Directory::deserialize_into_default(r)
+    }
+
+    pub fn write_root_directory(&mut self, directory: &Directory) -> io::Result<()> {
+        directory.serialize(self.write_into_root_cluster())?;
+        Ok(())
     }
 }
 
@@ -93,7 +128,6 @@ impl<M: Memory> Drop for FileSystem<M> {
 #[test]
 fn test() {
     use crate::bitmap::BitState;
-    use crate::block::Block;
     use crate::heap_memory::HeapMemory;
     use std::io::{Read, Write};
 
@@ -106,7 +140,7 @@ fn test() {
     let mut memory = HeapMemory::default();
 
     {
-        let mut fs = FileSystem::new(&mut memory);
+        let mut fs = FileSystem::new(&mut memory).unwrap();
 
         fs.bitmap.occupy(42);
         fs.bitmap.occupy(39);
@@ -140,5 +174,90 @@ fn test() {
         let mut read_data = vec![];
         reader.read_to_end(&mut read_data).unwrap();
         assert_eq!(read_data, data);
+    }
+}
+
+#[test]
+fn a_file() {
+    use crate::directory::EntryKind;
+    use crate::heap_memory::HeapMemory;
+    use std::io::{Read, Write};
+
+    let mut mem = HeapMemory::default();
+
+    {
+        let mut fs = FileSystem::new(&mut mem).unwrap();
+
+        fs.with_root_directory_mut(|root, fs| {
+            root.add_file("my-file.txt")
+                .write_to_file_system(fs)
+                .write_all(b"Hello World")
+        })
+        .unwrap();
+    }
+
+    {
+        let fs = FileSystem::open(&mut mem).unwrap();
+
+        fs.with_root_directory(|root| {
+            let entry = &root.entries[0];
+            assert_eq!(entry.kind, EntryKind::File);
+
+            let mut r = entry.read_from_file_system(&fs);
+            let mut result = [0u8; 5];
+            r.read_exact(&mut result)?;
+
+            assert_eq!(&result, b"Hello");
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+#[test]
+fn a_nested_dir() {
+    use crate::heap_memory::HeapMemory;
+    use std::io::Read;
+
+    let mut mem = HeapMemory::default();
+
+    {
+        let mut fs = FileSystem::new(&mut mem).unwrap();
+
+        fs.with_root_directory_mut(|root, fs| {
+            let mut dir = Directory::default();
+            dir.add_file("my_file.txt")
+                .write_to_file_system(fs)
+                .write_all(b"Hello, World!")?;
+
+            root.add_directory("my_dir")
+                .write_to_file_system(fs)
+                .write_directory(&dir)?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    {
+        let fs = FileSystem::open(&mut mem).unwrap();
+
+        fs.with_root_directory(|root| {
+            let dir_entry = &root.entries[0];
+            assert_eq!(&dir_entry.name, "my_dir");
+
+            let file_entry = &dir_entry
+                .read_from_file_system(&fs)
+                .read_directory()?
+                .entries[0];
+            assert_eq!(&file_entry.name, "my_file.txt");
+
+            let mut result = String::new();
+            file_entry
+                .read_from_file_system(&fs)
+                .read_to_string(&mut result)?;
+            assert_eq!(&result, "Hello, World!");
+            Ok(())
+        })
+        .unwrap();
     }
 }
