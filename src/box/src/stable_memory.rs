@@ -8,7 +8,7 @@ pub struct StableMemory;
 
 impl Memory for StableMemory {
     const PAGE_SIZE: usize = 65536;
-    const MAX_PAGES: usize = 65536;
+    const MAX_PAGES: usize = 65535;
 
     #[cfg(target_pointer_width = "32")]
     fn page_count(&self) -> io::Result<usize> {

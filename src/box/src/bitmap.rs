@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io::{self, Read, Write};
 
 use crate::block::Block;
@@ -16,7 +17,7 @@ impl Bitmap {
         }
     }
 
-    fn len_for_memory_impl<M: Memory>() -> usize {
+    pub fn len_for_memory_impl<M: Memory>() -> usize {
         M::MAX_SIZE / Block::SIZE / 8
     }
 
@@ -62,6 +63,19 @@ impl Bitmap {
             self.occupy(*i);
         }
         result
+    }
+}
+
+impl fmt::Debug for Bitmap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Bitmap ")?;
+        let mut occupied = f.debug_set();
+        for (i, state) in self.iter().enumerate() {
+            if state == BitState::Occupied {
+                occupied.entry(&i);
+            }
+        }
+        occupied.finish()
     }
 }
 

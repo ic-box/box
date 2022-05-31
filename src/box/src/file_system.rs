@@ -1,10 +1,11 @@
-use std::io::{self, Write};
+use std::fmt;
+use std::io;
 
 use crate::bitmap::Bitmap;
 use crate::block::Block;
-use crate::cluster::Cluster;
-use crate::directory::Directory;
-use crate::memory::Memory;
+use crate::cluster::{Cluster, ClusterReader, ClusterWriter};
+use crate::directory::{Directory, Entry, EntryKind};
+use crate::memory::{Memory, MemoryReader, MemoryWriter};
 use crate::serde::{Deserialize, Serialize};
 
 pub struct FileSystem<M: Memory> {
@@ -14,38 +15,55 @@ pub struct FileSystem<M: Memory> {
 }
 
 impl<M: Memory> FileSystem<M> {
-    const PREAMBLE_BLOCKS: usize = 32;
+    fn preamble_blocks() -> usize {
+        Bitmap::len_for_memory_impl::<M>() / Block::SIZE + 8
+    }
 
-    pub fn new(mut memory: M) -> io::Result<Self> {
-        let mut bitmap = Bitmap::new::<M>();
-        for i in 0..Self::PREAMBLE_BLOCKS {
-            bitmap.occupy(i);
-        }
-
-        let mut root_cluster = Cluster::default();
-
-        Directory::default().serialize(root_cluster.writer(&mut bitmap, memory.writer()))?;
-
-        Ok(Self {
-            bitmap,
-            root_cluster,
+    pub fn allocate(memory: M) -> Self {
+        Self {
+            bitmap: Bitmap::new::<M>(),
+            root_cluster: Cluster::default(),
             memory,
-        })
+        }
+    }
+
+    pub fn new(memory: M) -> io::Result<Self> {
+        let mut fs = Self::allocate(memory);
+        fs.init()?;
+        Ok(fs)
     }
 
     pub fn open(memory: M) -> io::Result<Self> {
-        let mut bitmap = Bitmap::new::<M>();
-        let mut root_cluster = Cluster::default();
-        {
-            let mut r = memory.reader();
-            bitmap.deserialize(&mut r)?;
-            root_cluster.deserialize(&mut r)?;
+        let mut fs = Self::allocate(memory);
+        fs.restore()?;
+        Ok(fs)
+    }
+
+    pub fn init(&mut self) -> io::Result<()> {
+        for i in 0..Self::preamble_blocks() {
+            self.bitmap.occupy(i);
         }
-        Ok(Self {
-            bitmap,
-            root_cluster,
-            memory,
-        })
+
+        Directory::default().serialize(
+            self.root_cluster
+                .writer(&mut self.bitmap, self.memory.writer()),
+        )?;
+
+        Ok(())
+    }
+
+    pub fn restore(&mut self) -> io::Result<()> {
+        let mut r = self.memory.reader();
+        self.bitmap.deserialize(&mut r)?;
+        self.root_cluster.deserialize(r)?;
+        Ok(())
+    }
+
+    pub fn persist(&mut self) -> io::Result<()> {
+        let mut w = self.memory.writer();
+        self.bitmap.serialize(&mut w)?;
+        self.root_cluster.serialize(w)?;
+        Ok(())
     }
 
     pub fn with_root_directory<R>(
@@ -53,6 +71,21 @@ impl<M: Memory> FileSystem<M> {
         f: impl FnOnce(&Directory) -> io::Result<R>,
     ) -> io::Result<R> {
         let dir = self.read_root_directory()?;
+        f(&dir)
+    }
+
+    pub fn with_directory<R>(
+        &self,
+        path: impl IntoIterator<Item = impl AsRef<str>>,
+        f: impl FnOnce(&Directory) -> io::Result<R>,
+    ) -> io::Result<R> {
+        let mut dir = self.read_root_directory()?;
+        for segment in path {
+            dir = match dir.entry_with_name(&segment) {
+                None => return Err(io::ErrorKind::NotFound.into()),
+                Some(entry) => entry.read_from_file_system(&self).read_directory()?,
+            };
+        }
         f(&dir)
     }
 
@@ -66,23 +99,62 @@ impl<M: Memory> FileSystem<M> {
         r
     }
 
+    pub fn with_directory_mut<R>(
+        &mut self,
+        path: impl IntoIterator<Item = impl AsRef<str>>,
+        f: impl FnOnce(&mut Directory, &mut Self) -> io::Result<R>,
+    ) -> io::Result<R> {
+        self.with_root_directory_mut(|root, fs| {
+            fs.with_directory_mut_rec(root, path.into_iter(), f)
+        })
+    }
+
+    fn with_directory_mut_rec<R>(
+        &mut self,
+        dir: &mut Directory,
+        mut path: impl Iterator<Item = impl AsRef<str>>,
+        f: impl FnOnce(&mut Directory, &mut Self) -> io::Result<R>,
+    ) -> io::Result<R> {
+        match path.next() {
+            Some(segment) => match dir.entry_with_name_mut(&segment) {
+                None => Err(io::ErrorKind::NotFound.into()),
+                Some(Entry {
+                    kind: EntryKind::File,
+                    ..
+                }) => Err(io::ErrorKind::Other.into()),
+                Some(
+                    entry @ Entry {
+                        kind: EntryKind::Directory,
+                        ..
+                    },
+                ) => {
+                    let mut subdir = entry.read_from_file_system(&self).read_directory()?;
+                    let r = self.with_directory_mut_rec(&mut subdir, path, f)?;
+                    entry.write_to_file_system(self).write_directory(&subdir)?;
+                    Ok(r)
+                }
+            },
+            None => f(dir, self),
+        }
+    }
+
     pub fn write_into_cluster<'a>(
         &'a mut self,
         cluster: &'a mut Cluster,
-    ) -> impl 'a + io::Write + io::Seek {
+    ) -> ClusterWriter<'a, MemoryWriter<'a, M>> {
         cluster.writer(&mut self.bitmap, self.memory.writer())
     }
 
-    pub fn write_into_root_cluster(&mut self) -> impl '_ + io::Write + io::Seek {
+    pub fn write_into_root_cluster(&mut self) -> ClusterWriter<MemoryWriter<M>> {
         self.root_cluster
             .writer(&mut self.bitmap, self.memory.writer())
     }
 
-    pub fn read_from_cluster<'a>(&'a self, cluster: &'a Cluster) -> impl 'a + io::Read + io::Seek {
+    pub fn read_from_cluster<'a>(&'a self, cluster: &'a Cluster) -> ClusterReader<MemoryReader<M>> {
         cluster.reader(self.memory.reader())
     }
 
-    pub fn read_from_root_cluster(&self) -> impl '_ + io::Read + io::Seek {
+    pub fn read_from_root_cluster(&self) -> ClusterReader<MemoryReader<M>> {
         self.root_cluster.reader(self.memory.reader())
     }
 
@@ -94,6 +166,14 @@ impl<M: Memory> FileSystem<M> {
     pub fn write_root_directory(&mut self, directory: &Directory) -> io::Result<()> {
         directory.serialize(self.write_into_root_cluster())?;
         Ok(())
+    }
+
+    pub fn make_directory_recursive<P, S>(&mut self, path: P) -> io::Result<()>
+    where
+        P: IntoIterator<Item = S>,
+        S: Into<String> + AsRef<str>,
+    {
+        self.with_root_directory_mut(|root, fs| root.make_directory_recursive(fs, path.into_iter()))
     }
 }
 
@@ -115,13 +195,52 @@ impl<M: Memory> Deserialize for FileSystem<M> {
 
 impl<M: Memory> Drop for FileSystem<M> {
     fn drop(&mut self) {
-        let mut w = self.memory.writer();
-        self.bitmap
-            .serialize(&mut w)
-            .expect("failed to write filesystem preamble");
-        self.root_cluster
-            .serialize(w)
-            .expect("failed to write filesystem preamble");
+        self.persist().expect("failed to write filesystem preamble");
+    }
+}
+
+impl<M: Memory> fmt::Display for FileSystem<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "/")?;
+
+        let mut dirs = vec![self.read_root_directory().or(Err(fmt::Error))?];
+        while dirs.len() > 0 {
+            let l = dirs.len() - 1;
+            let dir = dirs.last_mut().unwrap();
+            if dir.entries.is_empty() {
+                dirs.pop().unwrap();
+                continue;
+            }
+
+            write!(f, "\n{:>width$}", "| ", width = l * 4 + 2)?;
+
+            match &dir.entries.remove(0) {
+                Entry {
+                    kind: EntryKind::File,
+                    name,
+                    ..
+                } => {
+                    write!(f, "{}", name)?;
+                }
+
+                inner_dir @ Entry {
+                    kind: EntryKind::Directory,
+                    name,
+                    ..
+                } => {
+                    write!(f, "{}/", &name)?;
+                    drop(dir);
+
+                    dirs.push(
+                        inner_dir
+                            .read_from_file_system(self)
+                            .read_directory()
+                            .or(Err(fmt::Error))?,
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -163,7 +282,7 @@ fn test() {
                 .iter()
                 .filter(|s| s == &BitState::Occupied)
                 .count(),
-            FileSystem::<HeapMemory>::PREAMBLE_BLOCKS + DATA_BLOCKS + 3
+            FileSystem::<HeapMemory>::preamble_blocks() + DATA_BLOCKS + 3
         );
     }
 
@@ -217,7 +336,7 @@ fn a_file() {
 #[test]
 fn a_nested_dir() {
     use crate::heap_memory::HeapMemory;
-    use std::io::Read;
+    use std::io::{Read, Write};
 
     let mut mem = HeapMemory::default();
 
@@ -260,4 +379,22 @@ fn a_nested_dir() {
         })
         .unwrap();
     }
+}
+
+#[test]
+fn make_dir_recursive() {
+    use crate::heap_memory::HeapMemory;
+
+    let mut fs = FileSystem::new(HeapMemory::default()).unwrap();
+
+    let path = vec!["one", "two", "three"];
+    fs.make_directory_recursive(path).unwrap();
+
+    assert_eq!(
+        format!("{}", fs),
+        "/
+| one/
+    | two/
+        | three/"
+    )
 }

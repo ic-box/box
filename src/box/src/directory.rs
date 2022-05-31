@@ -1,8 +1,8 @@
 use std::io;
 
-use crate::cluster::Cluster;
+use crate::cluster::{Cluster, ClusterReader, ClusterWriter};
 use crate::file_system::FileSystem;
-use crate::memory::Memory;
+use crate::memory::{Memory, MemoryReader, MemoryWriter};
 use crate::serde::{Deserialize, Serialize};
 
 #[derive(Default, Debug)]
@@ -27,6 +27,82 @@ impl Directory {
             ..Default::default()
         });
         self.entries.last_mut().unwrap()
+    }
+
+    pub fn entry_with_name(&self, name: impl AsRef<str>) -> Option<&Entry> {
+        let n = name.as_ref();
+        self.entries.iter().find(|e| e.name == n)
+    }
+
+    pub fn entry_with_name_mut(&mut self, name: impl AsRef<str>) -> Option<&mut Entry> {
+        let n = name.as_ref();
+        self.entries.iter_mut().find(|e| e.name == n)
+    }
+
+    pub fn file_with_name_or_create_mut(
+        &mut self,
+        name: impl Into<String> + AsRef<str>,
+    ) -> io::Result<&mut Entry> {
+        let n = name.as_ref();
+
+        let mut idx = None;
+
+        for (i, e) in self.entries.iter_mut().enumerate() {
+            if e.name == n {
+                if e.kind == EntryKind::Directory {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("name {} exists as a directory", name.as_ref()),
+                    ));
+                }
+                idx = Some(i);
+                break;
+            }
+        }
+
+        match idx {
+            None => Ok(self.add_file(name.into())),
+            Some(idx) => Ok(self.entries.get_mut(idx).unwrap()),
+        }
+    }
+
+    pub fn make_directory_recursive<P, S, M>(
+        &mut self,
+        fs: &mut FileSystem<M>,
+        mut path: P,
+    ) -> io::Result<()>
+    where
+        M: Memory,
+        P: Iterator<Item = S>,
+        S: Into<String> + AsRef<str>,
+    {
+        match path.next() {
+            None => Ok(()),
+
+            Some(segment) => match self.entry_with_name_mut(segment.as_ref()) {
+                Some(Entry {
+                    kind: EntryKind::File,
+                    ..
+                }) => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{} is not a directory", segment.into()),
+                )),
+
+                Some(e) => e
+                    .read_from_file_system(fs)
+                    .read_directory()?
+                    .make_directory_recursive(fs, path),
+
+                None => {
+                    let mut new_dir = Directory::default();
+                    new_dir.make_directory_recursive(fs, path)?;
+
+                    let d = self.add_directory(segment);
+                    d.write_to_file_system(fs).write_directory(&new_dir)?;
+                    Ok(())
+                }
+            },
+        }
     }
 }
 
@@ -61,7 +137,7 @@ impl Entry {
     pub fn read_from_file_system<'a, M: Memory>(
         &'a self,
         fs: &'a FileSystem<M>,
-    ) -> EntryReader<'a, impl 'a + io::Read + io::Seek> {
+    ) -> EntryReader<'a, ClusterReader<'a, MemoryReader<'a, M>>> {
         self.reader(fs.read_from_cluster(&self.cluster))
     }
 
@@ -76,7 +152,7 @@ impl Entry {
     pub fn write_to_file_system<'a, M: Memory>(
         &'a mut self,
         fs: &'a mut FileSystem<M>,
-    ) -> EntryWriter<'a, impl 'a + io::Write + io::Seek> {
+    ) -> EntryWriter<'a, ClusterWriter<'a, MemoryWriter<'a, M>>> {
         let writer = fs.write_into_cluster(&mut self.cluster);
         EntryWriter {
             entry_size: &mut self.size,
@@ -155,7 +231,9 @@ pub struct EntryReader<'a, R> {
 }
 
 impl<'a, R> EntryReader<'a, R>
-where R: io::Read {
+where
+    R: io::Read,
+{
     pub fn read_directory(&mut self) -> io::Result<Directory> {
         Directory::deserialize_into_default(self)
     }

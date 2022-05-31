@@ -7,3 +7,4 @@ mod cluster;
 mod file_system;
 mod serde;
 mod directory;
+mod canister;

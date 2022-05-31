@@ -1,1 +1,6 @@
-service : {}
+service : {
+  list : (path : vec text) -> (names : vec text) query;
+  write : (path : vec text, data : blob) -> ();
+  read : (path : vec text) -> (data : blob) query;
+  makeDirectory : (path : vec text) -> ();
+}
