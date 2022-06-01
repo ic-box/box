@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::io::{self, Read, Seek};
+use std::io::{self, Read, Seek, Write};
 
 use ic_cdk::export::candid::types::Serializer;
 use ic_cdk::export::candid::{CandidType, Deserialize};
@@ -42,34 +42,21 @@ fn open_directory(path: Path) -> Directory {
 }
 
 #[query(name = "openFile")]
-fn open_file(mut path: Path) -> File {
-    let filename = path.pop().expect("path cannot be empty");
-
+fn open_file(path: Path) -> File {
     FILE_SYSTEM
         .with(|fs| {
             let fs = fs.borrow();
-            fs.with_directory(path, |dir| {
-                let file = dir
-                    .entry_with_name(filename)
-                    .ok_or::<io::Error>(io::ErrorKind::NotFound.into())?;
-                Ok(File::from(file))
-            })
+            fs.with_file(path, |file| Ok(File::from(file)))
         })
         .unwrap()
 }
 
 #[query(name = "readFile")]
-fn read_file(mut path: Path, start: Option<i64>, end: Option<i64>) -> Vec<u8> {
-    let filename = path.pop().expect("path cannot be empty");
-
+fn read_file(path: Path, start: Option<i64>, end: Option<i64>) -> Vec<u8> {
     FILE_SYSTEM
         .with(|fs| {
             let fs = fs.borrow();
-            fs.with_directory(path, |dir| {
-                let file = dir
-                    .entry_with_name(filename)
-                    .ok_or::<io::Error>(io::ErrorKind::NotFound.into())?;
-
+            fs.with_file(path, |file| {
                 let size = file.size as i64;
 
                 let mut start = start.unwrap_or_default();
@@ -98,6 +85,49 @@ fn read_file(mut path: Path, start: Option<i64>, end: Option<i64>) -> Vec<u8> {
 
                 r.read_exact(&mut data)?;
                 Ok(data)
+            })
+        })
+        .unwrap()
+}
+
+#[update(name = "createDirectory")]
+fn create_directory(path: Path) -> Directory {
+    FILE_SYSTEM
+        .with(|fs| -> io::Result<Directory> {
+            let mut fs = fs.borrow_mut();
+            fs.make_directory_recursive(path)?;
+            Ok(Directory { entries: vec![] })
+        })
+        .unwrap()
+}
+
+#[update(name = "createFile")]
+fn create_file(mut path: Path) -> File {
+    let filename = path.pop().expect("path cannot be empty");
+
+    FILE_SYSTEM
+        .with(|fs| {
+            let mut fs = fs.borrow_mut();
+            fs.with_directory_mut(path, |dir, _| {
+                dir.add_file(filename);
+                Ok(File { size: 0 })
+            })
+        })
+        .unwrap()
+}
+
+#[update(name = "writeFile")]
+fn write_file(path: Path, data: Vec<u8>, offset: Option<i64>) -> File {
+    FILE_SYSTEM
+        .with(|fs| {
+            let mut fs = fs.borrow_mut();
+            fs.with_file_mut(path, |file, fs| {
+                let mut w = file.write_to_file_system(fs);
+                if let Some(offset) = offset {
+                    w.seek(io::SeekFrom::Start(offset as u64))?;
+                }
+                w.write_all(&data)?;
+                Ok(File { size: 0 })
             })
         })
         .unwrap()
@@ -166,6 +196,12 @@ impl Path {
 
     pub fn len(&self) -> usize {
         self.segments.len()
+    }
+}
+
+impl Into<Vec<String>> for Path {
+    fn into(self) -> Vec<String> {
+        self.segments
     }
 }
 

@@ -88,10 +88,12 @@ impl Directory {
                     format!("{} is not a directory", segment.into()),
                 )),
 
-                Some(e) => e
-                    .read_from_file_system(fs)
-                    .read_directory()?
-                    .make_directory_recursive(fs, path),
+                Some(e) => {
+                    let mut existing_dir = e.read_from_file_system(fs).read_directory()?;
+                    existing_dir.make_directory_recursive(fs, path)?;
+                    e.write_to_file_system(fs).write_directory(&existing_dir)?;
+                    Ok(())
+                }
 
                 None => {
                     let mut new_dir = Directory::default();

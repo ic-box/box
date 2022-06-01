@@ -20,4 +20,8 @@ service : {
   openDirectory : (Path) -> (Directory) query;
   openFile : (Path) -> (File) query;
   readFile : (Path, start : opt int64, end : opt int64) -> (blob) query;
+
+  createDirectory : (Path) -> (Directory);
+  createFile : (Path) -> (File);
+  writeFile : (Path, data : blob, offset : opt int64) -> ();
 }

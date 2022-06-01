@@ -89,6 +89,50 @@ impl<M: Memory> FileSystem<M> {
         f(&dir)
     }
 
+    pub fn with_file<R, S: AsRef<str>>(
+        &self,
+        path: impl Into<Vec<S>>,
+        f: impl FnOnce(&Entry) -> io::Result<R>,
+    ) -> io::Result<R> {
+        let mut path = path.into();
+        let filename = path
+            .pop()
+            .ok_or::<io::Error>(io::ErrorKind::InvalidInput.into())?;
+
+        self.with_directory(path, |dir| {
+            let entry = dir
+                .entry_with_name(filename)
+                .ok_or::<io::Error>(io::ErrorKind::InvalidInput.into())?;
+            if let EntryKind::File = entry.kind {
+                f(entry)
+            } else {
+                Err(io::ErrorKind::InvalidInput.into())
+            }
+        })
+    }
+
+    pub fn with_file_mut<R, S: AsRef<str>>(
+        &mut self,
+        path: impl Into<Vec<S>>,
+        f: impl FnOnce(&mut Entry, &mut FileSystem<M>) -> io::Result<R>,
+    ) -> io::Result<R> {
+        let mut path = path.into();
+        let filename = path
+            .pop()
+            .ok_or::<io::Error>(io::ErrorKind::InvalidInput.into())?;
+
+        self.with_directory_mut(path, |dir, fs| {
+            let entry = dir
+                .entry_with_name_mut(filename)
+                .ok_or::<io::Error>(io::ErrorKind::InvalidInput.into())?;
+            if let EntryKind::File = entry.kind {
+                f(entry, fs)
+            } else {
+                Err(io::ErrorKind::InvalidInput.into())
+            }
+        })
+    }
+
     pub fn with_root_directory_mut<R>(
         &mut self,
         f: impl FnOnce(&mut Directory, &mut Self) -> io::Result<R>,
