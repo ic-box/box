@@ -1,8 +1,13 @@
 use std::cell::RefCell;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek};
 
+use ic_cdk::export::candid::types::Serializer;
+use ic_cdk::export::candid::{CandidType, Deserialize};
+use ic_cdk::export::serde::Deserializer;
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
+use percent_encoding::{percent_decode, utf8_percent_encode, CONTROLS};
 
+use crate::directory;
 use crate::file_system::FileSystem;
 use crate::stable_memory::StableMemory;
 
@@ -26,61 +31,187 @@ fn post_upgrade() {
     FILE_SYSTEM.with(|fs| fs.borrow_mut().restore()).unwrap()
 }
 
-#[query]
-fn list(path: Vec<String>) -> Vec<String> {
+#[query(name = "openDirectory")]
+fn open_directory(path: Path) -> Directory {
     FILE_SYSTEM
         .with(|fs| {
             let fs = fs.borrow();
-            fs.with_directory(path, |dir| {
-                Ok(dir.entries.iter().map(|e| &e.name).cloned().collect())
-            })
+            fs.with_directory(path, |dir| Ok(Directory::from(dir)))
         })
         .unwrap()
 }
 
-#[query]
-fn read(mut path: Vec<String>) -> Vec<u8> {
+#[query(name = "openFile")]
+fn open_file(mut path: Path) -> File {
+    let filename = path.pop().expect("path cannot be empty");
+
     FILE_SYSTEM
         .with(|fs| {
-            let name = match path.pop() {
-                Some(file) => file,
-                None => panic!("invalid file name"),
-            };
             let fs = fs.borrow();
             fs.with_directory(path, |dir| {
-                let entry = dir
-                    .entry_with_name(name)
+                let file = dir
+                    .entry_with_name(filename)
                     .ok_or::<io::Error>(io::ErrorKind::NotFound.into())?;
-                let mut result = vec![];
-                entry.read_from_file_system(&fs).read_to_end(&mut result)?;
-                Ok(result)
+                Ok(File::from(file))
             })
         })
         .unwrap()
 }
 
-#[update]
-fn write(mut path: Vec<String>, data: Vec<u8>) {
-    FILE_SYSTEM.with(|fs| {
-        let name = match path.pop() {
-            Some(file) => file,
-            None => panic!("invalid file name"),
-        };
-        let mut fs = fs.borrow_mut();
-        fs.with_directory_mut(path, |dir, fs| {
-            let entry = dir.file_with_name_or_create_mut(name)?;
-            entry.write_to_file_system(fs).write_all(data.as_slice())?;
-            Ok(())
+#[query(name = "readFile")]
+fn read_file(mut path: Path, start: Option<i64>, end: Option<i64>) -> Vec<u8> {
+    let filename = path.pop().expect("path cannot be empty");
+
+    FILE_SYSTEM
+        .with(|fs| {
+            let fs = fs.borrow();
+            fs.with_directory(path, |dir| {
+                let file = dir
+                    .entry_with_name(filename)
+                    .ok_or::<io::Error>(io::ErrorKind::NotFound.into())?;
+
+                let size = file.size as i64;
+
+                let mut start = start.unwrap_or_default();
+                let mut end = end.unwrap_or(file.size as i64);
+
+                if start < 0 {
+                    start = size + start;
+                }
+                if end < 0 {
+                    end = size + end;
+                }
+
+                if start > end {
+                    return Err(io::ErrorKind::InvalidInput.into());
+                }
+
+                let len = end - start;
+
+                let mut data = vec![0u8; len as usize];
+
+                let mut r = file.read_from_file_system(&fs);
+
+                if start > 0 {
+                    r.seek(io::SeekFrom::Start(start as u64))?;
+                }
+
+                r.read_exact(&mut data)?;
+                Ok(data)
+            })
         })
-        .unwrap();
-    })
+        .unwrap()
 }
 
-#[allow(non_snake_case)]
-#[update]
-fn makeDirectory(path: Vec<String>) {
-    FILE_SYSTEM.with(|fs| {
-        let mut fs = fs.borrow_mut();
-        fs.make_directory_recursive(path).unwrap();
-    })
+#[derive(CandidType, Deserialize)]
+struct Directory {
+    pub entries: Vec<Entry>,
+}
+
+impl<'a> From<&'a directory::Directory> for Directory {
+    fn from(dir: &'a directory::Directory) -> Self {
+        Directory {
+            entries: dir.entries.iter().map(Entry::from).collect(),
+        }
+    }
+}
+
+#[derive(CandidType, Deserialize)]
+struct Entry {
+    pub name: String,
+    pub kind: EntryKind,
+}
+
+impl<'a> From<&'a directory::Entry> for Entry {
+    fn from(e: &'a directory::Entry) -> Self {
+        Entry {
+            name: e.name.clone(),
+            kind: match e.kind {
+                crate::directory::EntryKind::Directory => EntryKind::Directory,
+                crate::directory::EntryKind::File => EntryKind::File(File {
+                    size: e.size as u64,
+                }),
+            },
+        }
+    }
+}
+
+#[derive(CandidType, Deserialize)]
+struct File {
+    size: u64,
+}
+
+impl<'a> From<&'a directory::Entry> for File {
+    fn from(entry: &'a directory::Entry) -> Self {
+        Self {
+            size: entry.size as u64,
+        }
+    }
+}
+
+#[derive(CandidType, Deserialize)]
+enum EntryKind {
+    Directory,
+    File(File),
+}
+
+struct Path {
+    segments: Vec<String>,
+}
+
+impl Path {
+    pub fn pop(&mut self) -> Option<String> {
+        self.segments.pop()
+    }
+
+    pub fn len(&self) -> usize {
+        self.segments.len()
+    }
+}
+
+impl IntoIterator for Path {
+    type Item = String;
+
+    type IntoIter = std::vec::IntoIter<String>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.segments.into_iter()
+    }
+}
+
+impl<'a> Deserialize<'a> for Path {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'a>,
+    {
+        let full: String = Deserialize::deserialize(deserializer)?;
+
+        let segments = full
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(|s| percent_decode(s.as_bytes()).decode_utf8_lossy().to_string())
+            .collect();
+
+        Ok(Self { segments })
+    }
+}
+
+const CHARS: percent_encoding::AsciiSet = CONTROLS.add(b'/').add(b'#').add(b'?');
+
+impl CandidType for Path {
+    fn _ty() -> candid::types::Type {
+        candid::types::Type::Text
+    }
+
+    fn idl_serialize<S>(&self, serializer: S) -> Result<(), S::Error>
+    where
+        S: Serializer,
+    {
+        self.segments
+            .iter()
+            .map(|s| utf8_percent_encode(s.as_str(), &CHARS).to_string())
+            .collect::<Vec<_>>()
+            .join("/")
+            .idl_serialize(serializer)
+    }
 }

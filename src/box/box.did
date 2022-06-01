@@ -1,6 +1,23 @@
+type Path = text;
+
+type Directory = record {
+  entries : vec Entry;
+};
+
+type File = record {
+  size : nat64;
+};
+
+type Entry = record {
+  name : text;
+  kind : variant {
+    Directory;
+    File : File;
+  };
+};
+
 service : {
-  list : (path : vec text) -> (names : vec text) query;
-  write : (path : vec text, data : blob) -> ();
-  read : (path : vec text) -> (data : blob) query;
-  makeDirectory : (path : vec text) -> ();
+  openDirectory : (Path) -> (Directory) query;
+  openFile : (Path) -> (File) query;
+  readFile : (Path, start : opt int64, end : opt int64) -> (blob) query;
 }
