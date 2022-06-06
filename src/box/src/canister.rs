@@ -102,22 +102,22 @@ fn create_directory(path: Path) -> Directory {
 }
 
 #[update(name = "createFile")]
-fn create_file(mut path: Path) -> File {
+fn create_file(mut path: Path, content_type: String) -> File {
     let filename = path.pop().expect("path cannot be empty");
 
     FILE_SYSTEM
         .with(|fs| {
             let mut fs = fs.borrow_mut();
             fs.with_directory_mut(path, |dir, _| {
-                dir.add_file(filename);
-                Ok(File { size: 0 })
+                dir.add_file(filename, content_type.clone());
+                Ok(File { size: 0, content_type })
             })
         })
         .unwrap()
 }
 
 #[update(name = "writeFile")]
-fn write_file(path: Path, data: Vec<u8>, offset: Option<i64>) -> File {
+fn write_file(path: Path, data: Vec<u8>, offset: Option<i64>) {
     FILE_SYSTEM
         .with(|fs| {
             let mut fs = fs.borrow_mut();
@@ -127,7 +127,7 @@ fn write_file(path: Path, data: Vec<u8>, offset: Option<i64>) -> File {
                     w.seek(io::SeekFrom::Start(offset as u64))?;
                 }
                 w.write_all(&data)?;
-                Ok(File { size: 0 })
+                Ok(())
             })
         })
         .unwrap()
@@ -158,9 +158,7 @@ impl<'a> From<&'a directory::Entry> for Entry {
             name: e.name.clone(),
             kind: match e.kind {
                 crate::directory::EntryKind::Directory => EntryKind::Directory,
-                crate::directory::EntryKind::File => EntryKind::File(File {
-                    size: e.size as u64,
-                }),
+                crate::directory::EntryKind::File => EntryKind::File(e.into()),
             },
         }
     }
@@ -169,12 +167,15 @@ impl<'a> From<&'a directory::Entry> for Entry {
 #[derive(CandidType, Deserialize)]
 struct File {
     size: u64,
+    #[serde(rename = "contentType")]
+    content_type: String,
 }
 
 impl<'a> From<&'a directory::Entry> for File {
     fn from(entry: &'a directory::Entry) -> Self {
         Self {
             size: entry.size as u64,
+            content_type: entry.content_type.clone(),
         }
     }
 }

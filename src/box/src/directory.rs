@@ -11,10 +11,11 @@ pub struct Directory {
 }
 
 impl Directory {
-    pub fn add_file(&mut self, name: impl Into<String>) -> &mut Entry {
+    pub fn add_file(&mut self, name: impl Into<String>, content_type: impl Into<String>) -> &mut Entry {
         self.entries.push(Entry {
             kind: EntryKind::File,
             name: name.into(),
+            content_type: content_type.into(),
             ..Default::default()
         });
         self.entries.last_mut().unwrap()
@@ -42,6 +43,7 @@ impl Directory {
     pub fn file_with_name_or_create_mut(
         &mut self,
         name: impl Into<String> + AsRef<str>,
+        content_type: impl Into<String>,
     ) -> io::Result<&mut Entry> {
         let n = name.as_ref();
 
@@ -61,7 +63,7 @@ impl Directory {
         }
 
         match idx {
-            None => Ok(self.add_file(name.into())),
+            None => Ok(self.add_file(name, content_type)),
             Some(idx) => Ok(self.entries.get_mut(idx).unwrap()),
         }
     }
@@ -125,6 +127,7 @@ pub struct Entry {
     pub kind: EntryKind,
     pub size: usize,
     pub name: String,
+    pub content_type: String,
     pub cluster: Cluster,
 }
 
@@ -176,6 +179,7 @@ impl Serialize for Entry {
     fn serialize(&self, mut w: impl io::Write) -> io::Result<usize> {
         Ok(self.kind.serialize(&mut w)?
             + self.name.as_str().serialize(&mut w)?
+            + self.content_type.as_str().serialize(&mut w)?
             + self.size.serialize(&mut w)?
             + self.cluster.serialize(w)?)
     }
@@ -185,6 +189,7 @@ impl Deserialize for Entry {
     fn deserialize(&mut self, mut r: impl io::Read) -> io::Result<usize> {
         Ok(self.kind.deserialize(&mut r)?
             + self.name.deserialize(&mut r)?
+            + self.content_type.deserialize(&mut r)?
             + self.size.deserialize(&mut r)?
             + self.cluster.deserialize(r)?)
     }

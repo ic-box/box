@@ -6,6 +6,7 @@ type Directory = record {
 
 type File = record {
   size : nat64;
+  contentType : text;
 };
 
 type Entry = record {
@@ -22,6 +23,6 @@ service : {
   readFile : (Path, start : opt int64, end : opt int64) -> (blob) query;
 
   createDirectory : (Path) -> (Directory);
-  createFile : (Path) -> (File);
+  createFile : (Path, contentType : text) -> (File);
   writeFile : (Path, data : blob, offset : opt int64) -> ();
 }
