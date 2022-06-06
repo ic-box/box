@@ -1,0 +1,20 @@
+{
+  "name": "@ic-fs/box",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/box.js"
+  },
+  "types": "./src/box.d.ts",
+  "dependencies": {
+    "@dfinity/agent": "^0.11.2",
+    "@dfinity/candid": "^0.11.2",
+    "@dfinity/principal": "^0.11.2"
+  },
+  "devDependencies": {
+    "typescript": "^4.7.2"
+  },
+  "scripts": {
+    "build": "tsc && cp .dfx/local/canisters/box/box.wasm src/"
+  }
+}
